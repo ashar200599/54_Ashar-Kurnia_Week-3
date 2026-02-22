@@ -1,0 +1,279 @@
+---
+title: "Ashar Kurnia_Week 3"
+author: "ashar"
+date: "2026-02-18"
+output: pdf_document
+---
+
+# A. Introduction
+	Dengue virus (DENV) infects hundreds of millions of people annually, yet there is only a limited knowledge of the host immune response to dengue. Here, we used a systems biological approach to perform a detailed analysis of the innate immune response to DENV infection in the whole blood samples of acutely infected humans in Bangkok, Thailand.
+	
+	
+	
+# B. Method
+#1. Package installation
+```{r}
+#a. Install BiocManager (manajer paket Bioconductor) 
+if (!require("BiocManager", quietly = TRUE))  {
+  install.packages("BiocManager") 
+}
+
+#b. Install paket Bioconductor (GEOquery & limma) 
+
+BiocManager::install(c("GEOquery", "limma"), force = T) 
+
+#c. Install annotation package platform
+#GPL96 = Affymetrix Human Genome U133A 
+BiocManager::install("hgu133a.db", ask = FALSE, update = FALSE)
+
+
+
+#d. Install cRAN package for Visualization and Manipulation Data
+
+install.packages(c("pheatmap", "ggplot2", "dplyr"))
+if (!requireNamespace("umap", quietly = TRUE)) {
+  install.packages("umap")
+}
+
+
+```
+
+#2. Library calling
+```{r}
+library(GEOquery)
+library(limma)
+library(pheatmap)
+library(ggplot2)
+library(dplyr)
+library(hgu133a.db)
+library(AnnotationDbi)
+library(umap)
+```
+#3. Get Datasets for GEO (GSE51808 datasets are used in this study)
+```{r}
+# The datasets contain 28 samples in tnfection time point, 19 in convalescent time point, 9 healthy control
+options(timeout = 1000)
+gset <- getGEO("GSE51808", GSEMatrix = TRUE, AnnotGPL = TRUE)[[1]] 
+
+```
+#4. Pre-Proccessing Gene Expression
+```{r}
+#exprs(): get expression gene matrix
+ex <- exprs(gset)
+#quantile(): count quantil value
+qx <- as.numeric(quantile(ex, c(0, 0.25, 0.5, 0.75, 0.99, 1), na.rm = FALSE))
+#LogTransform
+LogTransform <- (qx[5] > 100) |  (qx[6] - qx[1] > 50 && qx[2] > 0)
+
+#IF statement:
+#If LogTransform = TRUE, run log2
+LogTransform <- NA
+if (isTRUE(LogTransform)) {
+    print("Transforming")
+}
+```
+#5. Group Sample Identification
+```{r}
+group_info <- pData(gset)[["source_name_ch1"]]
+print(group_info)
+#make.names(): convert text into valid R format
+groups <- make.names(group_info)
+print(groups)
+#factor():
+#Convert categoric data into factor
+#Factor is very important for statistic in R
+gset$groups <- factor(groups)
+table(gset$group)  # Replication check for ebayes analysis (datasets must have replication)
+
+
+#levels(): see category in a factor
+group_name <- levels(gset$group)
+
+#Merge group
+group_name <- as.character(gset$group)
+
+# If contain dengue word→ dengue
+group_name[grepl("dengue", group_name, ignore.case = TRUE)] <- "dengue"
+
+# if contain normal and control → normal
+group_name[grepl("normal|control|healthy", group_name, ignore.case = TRUE)] <- "normal"
+
+# Convert to factor
+gset$group <- factor(group_name)
+
+# Result
+levels(gset$group)
+table(gset$group)
+```
+# 6. Matrix Design
+```{r}
+design <- model.matrix(~0 + gset$group)
+colnames(design) <- c("dengue", "normal")
+
+
+# Make contrast
+contrast.matrix <- makeContrasts(
+  dengue_vs_normal = dengue - normal,
+  levels = design
+)
+
+contrast.matrix
+```
+
+
+# 7. Differential Gene Expression Analysis (LIMMA)
+```{r}
+#Build linear model for gene expression
+
+# linear model
+fit <- lmFit(exprs(gset), design)
+
+
+
+#contrasts.fit(): apply contrast to model
+
+fit2 <- contrasts.fit(fit, contrast.matrix)
+
+sum(is.na(ex))
+sum(is.infinite(ex))
+
+#eBayes():
+#Empirical Bayes for stabilize varians model
+fit2 <- eBayes(fit2)
+
+#topTable():
+#Get final result of DEG
+#adjust = "fdr" -> multiple testing correction
+#p.value = 0.01  -> define significant gene
+topTableResults <- topTable(
+  fit2,
+  adjust = "fdr",
+  sort.by = "B",
+  number = Inf,
+  p.value = 0.01
+)
+
+head(topTableResults)
+
+
+
+```
+
+# 8.UMAP Visualization
+```{r}
+umap_input <- t(ex)
+
+#Run UMAP
+umap_result <- umap(umap_input)
+
+# Save to dataframe
+umap_df <- data.frame(
+  UMAP1 = umap_result$layout[, 1],
+  UMAP2 = umap_result$layout[, 2],
+  Group = gset$group
+)
+
+#UMAP Plot
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "UMAP Plot Sampel Berdasarkan Ekspresi Gen",
+    x = "UMAP 1",
+    y = "UMAP 2"
+  )
+
+```
+
+#9. Volcano plot
+```{r}
+volcano_data <- data.frame(
+  logFC = topTableResults$logFC,
+  adj.P.Val = topTableResults$adj.P.Val,
+  Gene = rownames(topTableResults)
+)
+
+#Status gene classification
+volcano_data$status <- "NO"
+volcano_data$status[volcano_data$logFC > 1 & volcano_data$adj.P.Val < 0.01] <- "UP"
+volcano_data$status[volcano_data$logFC < -1 & volcano_data$adj.P.Val < 0.01] <- "DOWN"
+
+
+#Visuazlization
+volcano_plot <- ggplot(volcano_data, aes(x = logFC, y = -log10(adj.P.Val), color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue", "NO" = "grey", "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal() +
+  ggtitle("Volcano Plot DEG Dengue")
+
+```
+
+#10. Heatmap Visualization
+```{r}
+# expression matrix
+mat <- exprs(gset)
+
+# Get fit gene
+common_genes <- intersect(rownames(topTableResults), rownames(mat))
+
+# Get top 50
+top50 <- topTableResults[common_genes, ]
+top50 <- top50[order(top50$adj.P.Val), ]
+top50 <- top50[1:50, ]
+
+# Heatmap matrix
+mat_heatmap <- mat[rownames(top50), ]
+
+# Remove NA
+mat_heatmap <- mat_heatmap[complete.cases(mat_heatmap), ]
+
+# annotation
+annotation_col <- data.frame(Group = gset$group)
+rownames(annotation_col) <- colnames(mat_heatmap)
+
+
+```
+
+
+# 11. Save work
+
+```{r}
+write.csv(topTableResults, "Hasil_GSE10072_DEG.csv")
+
+message("Analysis is done. File are saved.")
+```
+
+# C. Result and Interpretation
+```{r}
+
+#1. Volcano plot
+volcano_plot
+```
+
+The volcano plot shows of abundance downregulated gene. We can conclude that Dengue might affect in host immune gene expression.
+
+
+
+```{r}
+#2.Heatmap
+pheatmap(
+  mat_heatmap,
+  scale = "row",                 # Z-score per gen
+  annotation_col = annotation_col,
+  show_colnames = FALSE,         # nama sampel dimatikan
+  show_rownames = TRUE,
+  fontsize_row = 7,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  main = "Top 50 Differentially Expressed Genes"
+)
+```
+The heatmap shows larger number of downregulated gene in Dengue group which is complement with volcano plot.
+
+# D. Conclusion
+The abundance of dowregulated gene shows that Dengue fever is significantly affect host immune gene expression
+
+tinytex::install_tinytex()
